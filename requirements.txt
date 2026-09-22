@@ -6,3 +6,4 @@ ultralytics==8.0.196
 easyocr
 torch
 torchvision
+git+https://github.com/sberbank-ai/Real-ESRGAN.git
