@@ -2,7 +2,7 @@ streamlit
 numpy
 Pillow
 opencv-python-headless==4.10.0.84
-ultralytics
+ultralytics==8.3.0
 easyocr
 torch
 torchvision
