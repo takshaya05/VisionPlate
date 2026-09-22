@@ -1,7 +1,9 @@
+from pathlib import Path
 from ultralytics import YOLO
 
+MODEL_PATH = Path(__file__).resolve().parent.parent / "models" / "plate_model.pt"
 
-model = YOLO("models/plate_model.pt")
+model = YOLO(str(MODEL_PATH))
 
 
 def detect_plates(image):
