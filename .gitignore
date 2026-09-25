@@ -1,18 +1,32 @@
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-
+# Virtual environment
 .venv/
 venv/
 env/
 
-.vscode/
-.idea/
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
 
-.streamlit/secrets.toml
+# Streamlit
+.streamlit/
 
+# OS
 .DS_Store
 Thumbs.db
 
+# IDE
+.vscode/
+
+# Logs
 *.log
+
+# Temporary files
+*.tmp
+*.temp
+
+# Python cache
+.pytest_cache/
+
+# Jupyter
+.ipynb_checkpoints/

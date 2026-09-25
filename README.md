@@ -33,9 +33,7 @@ Manual identification of vehicle number plates can be time-consuming and ineffic
 
 * VisionPlate/
   * assets/
-  * models/
-  * modules/
   * app.py
-  * test.py
+  * plate_model.pt
   * requirements.txt
   * README.md
