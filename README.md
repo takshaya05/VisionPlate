@@ -6,28 +6,23 @@
 
 ## Overview
 
-VisionPlate is an AI-powered Automatic Number Plate Recognition (ANPR) web application that detects vehicle number plates and recognizes their characters automatically.
-
-## Problem Statement
-
-Manual identification of vehicle number plates can be time-consuming and inefficient. VisionPlate uses YOLO for plate detection and EasyOCR for character recognition through an interactive web application.
+VisionPlate is an AI-powered Automatic Number Plate Recognition (ANPR) application that detects vehicle number plates and automatically recognizes their characters from images.
 
 ## Features
 
-* **Plate Detection:** Detect number plates using YOLO.
+* **Plate Detection:** Detect vehicle number plates using YOLO.
 * **Plate Recognition:** Recognize plate characters using EasyOCR.
-* **Confidence Scores:** Display detection and OCR confidence.
-* **Multiple Plate Detection:** Detect multiple plates in one image.
-* **Interactive Dashboard:** View images, detected plates, and results.
+* **Confidence Scores:** Display detection and OCR confidence scores.
+* **Multiple Plate Detection:** Detect multiple number plates in a single image.
+* **Interactive Dashboard:** Display uploaded images, detected plates, and recognition results.
 
 ## Tech Stack
 
-* Python
-* Streamlit
-* YOLO
-* EasyOCR
-* OpenCV
-* NumPy
+* **Python:** Implement the application and AI processing.
+* **Streamlit:** Build the interactive web interface.
+* **YOLO:** Detect vehicle number plates.
+* **EasyOCR:** Recognize characters from detected plates.
+* **OpenCV:** Process and manipulate vehicle images.
 
 ## Project Structure
 
@@ -36,4 +31,3 @@ Manual identification of vehicle number plates can be time-consuming and ineffic
   * app.py
   * plate_model.pt
   * requirements.txt
-  * README.md
