@@ -3,7 +3,7 @@ ultralytics
 easyocr
 opencv-python-headless
 pillow
-numpy
+numpy>=2.4,<3
 torch
 torchvision
 pytesseract
