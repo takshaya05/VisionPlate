@@ -1,0 +1,1 @@
+"""VisionPlate model components."""

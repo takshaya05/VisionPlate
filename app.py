@@ -1,1935 +1,1624 @@
-import streamlit as st
-from ultralytics import YOLO
-import easyocr
+from pathlib import Path
+from collections import OrderedDict
+import json
+import time
+import tempfile
+
 import cv2
 import numpy as np
+import streamlit as st
 from PIL import Image
-import torch
-import re
-import hashlib
+
+from models.detector import PlateDetector
+from models.enhancement import ImageEnhancer
+from models.ocr import PlateOCR
+from models.pipeline import RecognitionPipeline
+from utils.image_utils import load_image, image_to_bytes
+
+
+ROOT = Path(__file__).resolve().parent
+MODEL_PATH = ROOT / "plate_model.pt"
+DEFAULT_CONFIDENCE = 0.25
 
 st.set_page_config(
-    page_title="VisionPlate – Smart Plate Recognition",
+    page_title="VisionPlate",
     page_icon="🚘",
     layout="wide",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="collapsed",
 )
 
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap');
+
+:root {
+    --bg: #090b12;
+    --surface: #111522;
+    --surface2: #171c2c;
+    --ink: #f4f6ff;
+    --muted: #9aa3bb;
+    --line: #252c40;
+    --blue: #7185ff;
+    --purple: #a17aff;
+}
 
 html, body, [class*="css"] {
-    font-family: 'Inter', sans-serif;
+    font-family: 'DM Sans', sans-serif;
 }
 
 .stApp {
-    background:
-        radial-gradient(circle at 10% 10%, rgba(0,217,255,0.08), transparent 28%),
-        radial-gradient(circle at 90% 15%, rgba(104,117,255,0.09), transparent 30%),
-        radial-gradient(circle at 50% 90%, rgba(38,215,199,0.06), transparent 28%),
-        #070b12;
-    color: #eef5ff;
+    background: radial-gradient(ellipse at 80% 0%, #202044 0%, #090b12 45%);
+    color: var(--ink);
+}
+
+#MainMenu, footer, header {
+    visibility: hidden;
 }
 
 .block-container {
-    max-width: 1450px;
-    padding-top: 1.2rem;
-    padding-bottom: 2rem;
+    max-width: 1440px;
+    padding: 1.2rem 4.5% 3rem;
 }
 
 [data-testid="stHeader"] {
     background: transparent;
 }
 
-[data-testid="stVerticalBlockBorderWrapper"] {
-    border: 1px solid rgba(94,211,255,0.14) !important;
-    border-radius: 20px !important;
-    background:
-        linear-gradient(
-            145deg,
-            rgba(18,28,44,0.88),
-            rgba(9,15,25,0.94)
-        ) !important;
-    box-shadow:
-        0 10px 30px rgba(0,0,0,0.18),
-        0 0 18px rgba(0,217,255,0.035),
-        inset 0 1px 0 rgba(255,255,255,0.025) !important;
-    padding: 5px !important;
-    margin-bottom: 20px !important;
-    transition: all 0.25s ease;
+.top-brand {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 4px 0 18px;
 }
 
-[data-testid="stVerticalBlockBorderWrapper"]:hover {
-    border-color: rgba(0,217,255,0.26) !important;
-    box-shadow:
-        0 14px 36px rgba(0,0,0,0.24),
-        0 0 24px rgba(0,217,255,0.055),
-        inset 0 1px 0 rgba(255,255,255,0.035) !important;
-}
-
-.stButton > button {
-    width: 100%;
-    border-radius: 12px;
-    border: 1px solid rgba(0,217,255,0.24);
-    background: linear-gradient(135deg, #102234, #132d43);
-    color: #eaf9ff;
-    font-weight: 600;
-    min-height: 44px;
-    transition: all 0.2s ease;
-}
-
-.stButton > button:hover {
-    border-color: #00d9ff;
-    color: white;
-    background: linear-gradient(135deg, #123149, #173d5b);
-    box-shadow: 0 0 20px rgba(0,217,255,0.12);
-    transform: translateY(-1px);
-}
-
-.stButton > button:focus {
-    box-shadow: 0 0 0 2px rgba(0,217,255,0.18);
-}
-
-button[aria-label="🚀 Start Now"] {
-    width: 220px !important;
-    margin: 0 auto !important;
-    display: block !important;
-}
-
-.stTabs [data-baseweb="tab-list"] {
-    gap: 8px;
-    background: rgba(10,16,27,0.72);
-    padding: 7px;
-    border-radius: 15px;
-    border: 1px solid rgba(94,211,255,0.10);
-}
-
-.stTabs [data-baseweb="tab"] {
-    border-radius: 10px;
-    padding: 10px 20px;
-    color: #9eafc4;
-}
-
-.stTabs [aria-selected="true"] {
-    background: rgba(0,217,255,0.10);
-    color: #72eaff !important;
-}
-
-[data-testid="stFileUploader"] {
-    border-radius: 16px;
-}
-
-[data-testid="stMetric"] {
-    background: rgba(13,24,38,0.65);
-    border: 1px solid rgba(94,211,255,0.12);
-    border-radius: 15px;
-    padding: 12px;
-}
-
-[data-testid="stMetricValue"] {
-    color: #72eaff;
-}
-
-[data-testid="stImage"] {
-    border-radius: 15px;
-    overflow: hidden;
-}
-
-.stAlert {
+.brand-symbol {
+    width: 44px;
+    height: 44px;
     border-radius: 14px;
+    background: linear-gradient(135deg, #7185ff, #a17aff);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    color: white;
+    font-size: 25px;
+    box-shadow: 0 8px 25px #7185ff30;
 }
 
-.hero-title {
-    font-size: clamp(42px, 6vw, 78px);
-    line-height: 0.98;
+.brand-name {
+    font-family: Manrope, sans-serif;
     font-weight: 800;
-    letter-spacing: -3px;
-    margin: 12px 0;
-    background: linear-gradient(
-        90deg,
-        #f2fbff,
-        #72eaff,
-        #8f86ff
-    );
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
+    font-size: 23px;
+    letter-spacing: -1px;
+    color: #f4f6ff;
 }
 
-.hero-tagline {
-    font-size: 22px;
-    font-weight: 600;
-    color: #72eaff;
-    margin-bottom: 14px;
-}
-
-.hero-description {
-    color: #a9b9cc;
-    font-size: 16px;
-    line-height: 1.8;
-    max-width: 720px;
-}
-
-.section-kicker {
-    color: #72eaff;
-    font-size: 12px;
-    font-weight: 700;
-    letter-spacing: 1.5px;
+.brand-subtitle {
+    color: #9aa3bb;
+    font-size: 10px;
+    letter-spacing: 1.6px;
     text-transform: uppercase;
+    margin-top: -2px;
 }
 
-.section-title {
-    font-size: 30px;
-    font-weight: 750;
-    color: #f3f8ff;
-    margin: 5px 0 4px;
+.hero {
+    background: linear-gradient(125deg, #171d36, #24264b 55%, #48336d);
+    border: 1px solid #ffffff12;
+    border-radius: 28px;
+    padding: 48px 38px;
+    color: white;
+    min-height: 320px;
+    box-shadow: 0 24px 70px #0005;
 }
 
-.section-description {
-    color: #8fa2b8;
-    line-height: 1.7;
+.hero-label {
+    display: inline-block;
+    padding: 8px 13px;
+    border: 1px solid #ffffff30;
+    background: #ffffff0c;
+    border-radius: 30px;
+    color: #d9ddff;
+    font-size: 11px;
+    letter-spacing: 1px;
+    margin-bottom: 22px;
 }
 
-.card-text {
-    color: #91a4ba;
-    line-height: 1.65;
-    font-size: 14px;
+.hero h1 {
+    font-family: Manrope, sans-serif;
+    font-size: clamp(35px, 4.2vw, 59px);
+    line-height: 1.12;
+    letter-spacing: -2.4px;
+    font-weight: 800;
+    color: white;
+    margin: 0 0 20px;
 }
 
-.feature-icon {
-    font-size: 30px;
+.hero h1 span {
+    color: #b6c0ff;
+}
+
+.hero p {
+    color: #d1d6ed;
+    font-size: 15px;
+    line-height: 1.85;
+}
+
+.hero-art {
+    min-height: 280px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+.orbit {
+    width: 250px;
+    height: 250px;
+    border: 1px solid #ffffff25;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+}
+
+.orbit:before {
+    content: "";
+    position: absolute;
+    width: 190px;
+    height: 190px;
+    border: 1px dashed #ffffff35;
+    border-radius: 50%;
+}
+
+.car-icon {
+    font-size: 90px;
+    filter: drop-shadow(0 15px 20px #0008);
+    z-index: 2;
+}
+
+.floating-card {
+    position: absolute;
+    background: #f7f8ff;
+    color: #171b30;
+    box-shadow: 0 16px 40px #0005;
+    border-radius: 15px;
+    padding: 12px 15px;
+    z-index: 3;
+}
+
+.floating-card small {
+    display: block;
+    font-size: 10px;
+    color: #737b91;
+    letter-spacing: 1px;
     margin-bottom: 5px;
 }
 
-.about-intro {
-    color: #a9b9cc;
+.plate-number {
+    font-family: Manrope, sans-serif;
+    font-weight: 800;
+    font-size: 17px;
+    letter-spacing: 1.5px;
+}
+
+.plate-card {
+    right: -12px;
+    bottom: 12px;
+}
+
+.scan-card {
+    top: 20px;
+    left: -15px;
+}
+
+.section-heading {
+    font-family: Manrope, sans-serif;
+    font-size: 27px;
+    letter-spacing: -.8px;
+    font-weight: 800;
+    color: var(--ink);
+    margin: 0 0 8px;
+}
+
+.section-subheading {
+    color: var(--muted);
+    font-size: 14px;
     line-height: 1.8;
-    font-size: 15px;
+    margin-bottom: 20px;
 }
 
-.tech-name {
-    font-size: 16px;
-    font-weight: 700;
-    color: #eaf7ff;
+.feature-card, .step-card, .metric-box, .page-banner {
+    background: linear-gradient(145deg, #141929, #101421);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 17px;
+    box-sizing: border-box;
 }
 
-.tech-desc {
-    color: #899cb2;
-    font-size: 13px;
-    line-height: 1.5;
+.feature-card {
+    height: 158px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    transition: transform .2s ease, border-color .2s ease;
+}
+
+.feature-card:hover {
+    transform: translateY(-3px);
+    border-color: #5868b8;
+}
+
+.feature-icon {
+    width: 38px;
+    height: 38px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 11px;
+    background: #252b4c;
+    color: #b8c2ff;
+    font-size: 19px;
+    margin-bottom: 9px;
+}
+
+.feature-card h3, .step-card h3 {
+    font-family: Manrope, sans-serif;
+    font-size: 14px;
+    font-weight: 800;
+    color: var(--ink);
+    margin: 0 0 7px;
+}
+
+.feature-card p, .step-card p {
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--muted);
+    margin: 0;
+}
+
+.step-card {
+    height: 140px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.step-number {
+    color: #aab5ff;
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 1px;
+    margin-bottom: 9px;
+}
+
+.page-banner {
+    padding: 24px;
+    margin-bottom: 22px;
+}
+
+.page-banner h1 {
+    font-family: Manrope, sans-serif;
+    font-size: 31px;
+    letter-spacing: -1px;
+    color: var(--ink);
+    margin: 0 0 9px;
+}
+
+.page-banner p {
+    color: var(--muted);
+    line-height: 1.8;
+    margin: 0;
+    font-size: 14px;
+}
+
+.metric-box {
+    min-height: 105px;
+    padding: 18px;
+}
+
+.metric-label {
+    color: var(--muted);
+    font-size: 11px;
+    margin-bottom: 8px;
+    letter-spacing: .5px;
+}
+
+.metric-value {
+    font-family: Manrope, sans-serif;
+    font-size: 26px;
+    font-weight: 800;
+    color: var(--ink);
+    overflow-wrap: anywhere;
 }
 
 .plate-result {
-    font-size: 34px;
+    background: #1a2038;
+    border: 1px solid #303b66;
+    border-radius: 14px;
+    padding: 15px;
+    margin: 8px 0;
+}
+
+.plate-result-number {
+    font-family: Manrope, sans-serif;
+    color: #c2caff;
+    font-size: 23px;
     font-weight: 800;
     letter-spacing: 2px;
-    color: #72eaff;
-    text-align: center;
-    padding: 12px 0;
+    overflow-wrap: anywhere;
 }
 
-.result-label {
-    color: #8195ac;
+.muted {
+    color: var(--muted);
     font-size: 12px;
-    text-align: center;
-    text-transform: uppercase;
-    letter-spacing: 1.2px;
+    line-height: 1.7;
 }
 
-.camera-note {
-    color: #8fa2b8;
-    font-size: 13px;
-    text-align: center;
-    padding: 5px;
-}
-
-.footer-brand {
-    font-size: 18px;
-    font-weight: 800;
-    color: #eaf7ff;
-}
-
-.footer-tagline {
-    color: #72eaff;
-    font-size: 13px;
-    margin-top: -5px;
-}
-
-.footer-text {
-    color: #778ba2;
-    font-size: 12px;
-    line-height: 1.6;
-}
-
-.small-gap {
-    height: 10px;
-}
-
-.hero-points {
-    color: #91a4ba;
-    font-size: 14px;
-    line-height: 1.9;
-    margin-top: 12px;
-}
-
-.about-badge {
-    color: #72eaff;
-    font-size: 12px;
+div.stButton > button, div.stDownloadButton > button {
+    border-radius: 12px;
+    min-height: 44px;
     font-weight: 700;
-    letter-spacing: 1px;
-    text-transform: uppercase;
-    margin-bottom: 8px;
+    border: 1px solid #303850;
+    background: #171c2c;
+    color: #e8ebfa;
 }
 
-[data-testid="stMarkdownContainer"] p {
-    margin-bottom: 0.45rem;
+div.stButton > button[kind="primary"],
+div.stDownloadButton > button[kind="primary"] {
+    background: linear-gradient(120deg, #6176ff, #8c64ef);
+    color: white;
+    border: 0;
+    box-shadow: 0 7px 18px #5267f229;
+}
+
+div.stButton > button:hover, div.stDownloadButton > button:hover {
+    border-color: #7185ff;
+    color: #aebaff;
+}
+
+div[data-testid="stFileUploader"] {
+    background: #111522;
+    border: 1px dashed #3b4562;
+    border-radius: 16px;
+    padding: 13px;
+}
+
+div[data-testid="stFileUploader"] section {
+    background: transparent;
+}
+
+div[data-testid="stExpander"] {
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: #111522;
+}
+
+div[role="radiogroup"] {
+    gap: 8px;
+}
+
+div[role="radiogroup"] label {
+    background: #141929;
+    border: 1px solid #303850;
+    border-radius: 12px;
+    padding: 8px 16px;
+    color: #e8ebfa;
+}
+
+div[role="radiogroup"] label:has(input:checked) {
+    border-color: #7185ff;
+    background: #202746;
+}
+
+.stTabs [data-baseweb="tab-list"] {
+    gap: 7px;
+    background: #111522;
+    padding: 7px;
+    border-radius: 13px;
+}
+
+.stTabs [data-baseweb="tab"] {
+    background: transparent;
+    border-radius: 9px;
+    color: #aab2ca;
+}
+
+.stTabs [aria-selected="true"] {
+    background: #252d4a !important;
+    color: #fff !important;
+}
+
+.stTextInput input, .stTextArea textarea,
+.stSelectbox div[data-baseweb="select"],
+.stNumberInput input {
+    background: #111522 !important;
+    color: #f4f6ff !important;
+    border-color: #303850 !important;
+}
+
+.stCheckbox label, .stRadio label {
+    color: #e2e6f5 !important;
+}
+
+[data-testid="stMetric"] {
+    background: #141929;
+    border: 1px solid #293149;
+    border-radius: 14px;
+    padding: 12px;
+}
+
+[data-testid="stDataFrame"], [data-testid="stTable"] {
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    overflow: hidden;
 }
 
 hr {
-    border-color: rgba(94,211,255,0.10) !important;
+    border-color: var(--line);
+}
+
+small, .stCaption {
+    color: var(--muted);
+}
+
+.footer-line {
+    border-top: 1px solid var(--line);
+    padding-top: 20px;
+    margin-top: 35px;
+    color: #78829c;
+    font-size: 12px;
+    text-align: center;
+}
+
+div[data-testid="stImage"] {
+    margin-left: auto;
+    margin-right: auto;
+}
+
+div[data-testid="stImage"] img {
+    border-radius: 12px;
+}
+
+@media(max-width: 760px) {
+    .block-container {
+        padding: 1rem 1rem 2rem;
+    }
+
+    .hero {
+        padding: 32px 24px;
+        border-radius: 22px;
+    }
+
+    .hero-art {
+        min-height: 220px;
+        margin-top: 20px;
+    }
+
+    .orbit {
+        width: 220px;
+        height: 220px;
+    }
+
+    .car-icon {
+        font-size: 75px;
+    }
+
+    .feature-card {
+        height: auto;
+        min-height: 145px;
+    }
+
+    .step-card {
+        height: auto;
+        min-height: 125px;
+    }
+
+    .section-heading {
+        font-size: 23px;
+    }
 }
 </style>
 """, unsafe_allow_html=True)
 
-if "section" not in st.session_state:
-    st.session_state.section = "Home"
 
-if "camera_enabled" not in st.session_state:
-    st.session_state.camera_enabled = False
-
-if "camera_key" not in st.session_state:
-    st.session_state.camera_key = 0
-
-if "image_key" not in st.session_state:
-    st.session_state.image_key = 0
-
-if "image_signature" not in st.session_state:
-    st.session_state.image_signature = None
-
-if "image_result" not in st.session_state:
-    st.session_state.image_result = None
-
-if "image_detections" not in st.session_state:
-    st.session_state.image_detections = []
-
-if "camera_result" not in st.session_state:
-    st.session_state.camera_result = None
-
-if "camera_detections" not in st.session_state:
-    st.session_state.camera_detections = []
-
-if "video_key" not in st.session_state:
-    st.session_state.video_key = 0
-
-
-@st.cache_resource
-def load_model():
-    return YOLO("plate_model.pt")
-
-
-@st.cache_resource
-def load_reader():
-    return easyocr.Reader(
-        ["en"],
-        gpu=torch.cuda.is_available()
-    )
-
-
-try:
-    model = load_model()
-    reader = load_reader()
-    model_ready = True
-except Exception as e:
-    model_ready = False
-    model_error = str(e)
-
-
-def clean_plate(text):
-    text = str(text).upper()
-    text = re.sub(r"[^A-Z0-9]", "", text)
-    return text
-
-
-def correct_letter(char):
-    replacements = {
-        "0": "O",
-        "1": "I",
-        "2": "Z",
-        "5": "S",
-        "6": "G",
-        "8": "B"
+def init_state():
+    defaults = {
+        "page": "Home",
+        "last_result": None,
+        "last_filename": None,
+        "history": [],
+        "processing_error": None,
+        "image_upload_version": 0,
+        "video_upload_version": 0,
     }
 
-    return replacements.get(char, char)
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+    if "main_navigation" not in st.session_state:
+        st.session_state.main_navigation = st.session_state.page
 
 
-def correct_digit(char):
-    replacements = {
-        "O": "0",
-        "Q": "0",
-        "D": "0",
-        "I": "1",
-        "L": "1",
-        "Z": "2",
-        "S": "5",
-        "B": "8",
-        "G": "6"
-    }
-
-    return replacements.get(char, char)
+def navigate_to(page):
+    st.session_state.page = page
+    st.session_state.main_navigation = page
 
 
-def correct_segment(segment, segment_type):
-    result = []
-
-    for char in segment:
-
-        if segment_type == "letter":
-
-            if char in "0123456789":
-                char = correct_letter(char)
-
-        elif segment_type == "digit":
-
-            if char in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
-                char = correct_digit(char)
-
-        result.append(char)
-
-    return "".join(result)
+def sync_navigation():
+    st.session_state.page = st.session_state.main_navigation
 
 
-def validate_indian_plate_raw(text):
-    text = clean_plate(text)
-
-    patterns = [
-        r"^[A-Z]{2}[0-9]{1,2}[A-Z]{1,3}[0-9]{4}$",
-        r"^[0-9]{2}BH[0-9]{4}[A-Z]{1,2}$"
-    ]
-
-    return any(
-        re.fullmatch(pattern, text)
-        for pattern in patterns
-    )
-
-
-def generate_indian_plate_candidates(text):
-    text = clean_plate(text)
-
-    if not text:
-        return []
-
-    candidates = []
-
-    possible_lengths = [
-        (1, 1),
-        (1, 2),
-        (1, 3),
-        (2, 1),
-        (2, 2),
-        (2, 3)
-    ]
-
-    for district_length, series_length in possible_lengths:
-
-        expected_length = (
-            2
-            + district_length
-            + series_length
-            + 4
+@st.cache_resource(show_spinner="Loading recognition models...")
+def load_pipeline():
+    if not MODEL_PATH.is_file():
+        raise FileNotFoundError(
+            f"Model file not found: {MODEL_PATH}"
         )
 
-        if len(text) != expected_length:
-            continue
-
-        state_end = 2
-        district_end = state_end + district_length
-        series_end = district_end + series_length
-
-        state_part = text[:state_end]
-
-        district_part = text[
-            state_end:district_end
-        ]
-
-        series_part = text[
-            district_end:series_end
-        ]
-
-        number_part = text[
-            series_end:series_end + 4
-        ]
-
-        corrected_state = correct_segment(
-            state_part,
-            "letter"
-        )
-
-        corrected_district = correct_segment(
-            district_part,
-            "digit"
-        )
-
-        corrected_series = correct_segment(
-            series_part,
-            "letter"
-        )
-
-        corrected_number = correct_segment(
-            number_part,
-            "digit"
-        )
-
-        candidate = (
-            corrected_state
-            + corrected_district
-            + corrected_series
-            + corrected_number
-        )
-
-        if validate_indian_plate_raw(candidate):
-            candidates.append(candidate)
-
-    return list(dict.fromkeys(candidates))
-
-
-def normalize_bharat_plate(text):
-    text = clean_plate(text)
-
-    if len(text) != 10:
-        return ""
-
-    first_part = correct_segment(
-        text[:2],
-        "digit"
-    )
-
-    bh_part = correct_segment(
-        text[2:4],
-        "letter"
-    )
-
-    number_part = correct_segment(
-        text[4:8],
-        "digit"
-    )
-
-    series_part = correct_segment(
-        text[8:],
-        "letter"
-    )
-
-    candidate = (
-        first_part
-        + bh_part
-        + number_part
-        + series_part
-    )
-
-    if re.fullmatch(
-        r"^[0-9]{2}BH[0-9]{4}[A-Z]{1,2}$",
-        candidate
-    ):
-        return candidate
-
-    return ""
-
-
-def normalize_indian_plate(text):
-    text = clean_plate(text)
-
-    bharat_candidate = normalize_bharat_plate(text)
-
-    if bharat_candidate:
-        return bharat_candidate
-
-    if validate_indian_plate_raw(text):
-        return text
-
-    candidates = generate_indian_plate_candidates(text)
-
-    if candidates:
-        return candidates[0]
-
-    return text
-
-
-def validate_indian_plate(text):
-    normalized = normalize_indian_plate(text)
-
-    return validate_indian_plate_raw(normalized)
-
-
-def prepare_ocr_candidates(crop):
-
-    if crop is None or crop.size == 0:
-        return []
-
-    if len(crop.shape) == 3:
-        gray = cv2.cvtColor(
-            crop,
-            cv2.COLOR_BGR2GRAY
-        )
-    else:
-        gray = crop.copy()
-
-    height, width = gray.shape[:2]
-
-    if width < 500:
-        scale = 4.0
-    elif width < 900:
-        scale = 3.0
-    else:
-        scale = 2.0
-
-    resized = cv2.resize(
-        gray,
-        None,
-        fx=scale,
-        fy=scale,
-        interpolation=cv2.INTER_CUBIC
-    )
-
-    denoised = cv2.bilateralFilter(
-        resized,
-        9,
-        75,
-        75
-    )
-
-    clahe = cv2.createCLAHE(
-        clipLimit=2.5,
-        tileGridSize=(8, 8)
-    )
-
-    enhanced = clahe.apply(denoised)
-
-    sharpen_kernel = np.array([
-        [0, -1, 0],
-        [-1, 5, -1],
-        [0, -1, 0]
-    ])
-
-    sharpened = cv2.filter2D(
-        enhanced,
-        -1,
-        sharpen_kernel
-    )
-
-    otsu = cv2.threshold(
-        enhanced,
-        0,
-        255,
-        cv2.THRESH_BINARY + cv2.THRESH_OTSU
-    )[1]
-
-    adaptive = cv2.adaptiveThreshold(
-        enhanced,
-        255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY,
-        31,
-        7
-    )
-
-    return [
-        resized,
-        enhanced,
-        sharpened,
-        otsu,
-        adaptive
-    ]
-
-
-def read_plate(crop):
-
-    if crop is None or crop.size == 0:
-        return "", 0.0
-
-    candidates = prepare_ocr_candidates(crop)
-
-    best_text = ""
-    best_confidence = 0.0
-    best_score = -1.0
-    best_valid = False
-
-    for candidate in candidates:
-
-        try:
-
-            results = reader.readtext(
-                candidate,
-                decoder="beamsearch",
-                beamWidth=10,
-                allowlist="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
-                detail=1,
-                paragraph=False,
-                min_size=5,
-                contrast_ths=0.05,
-                adjust_contrast=0.6,
-                text_threshold=0.55,
-                low_text=0.25,
-                link_threshold=0.25,
-                canvas_size=2560,
-                mag_ratio=1.2,
-                add_margin=0.12
-            )
-
-            if not results:
-                continue
-
-            individual_results = []
-
-            for item in results:
-
-                if len(item) < 3:
-                    continue
-
-                raw_text = clean_plate(item[1])
-                confidence = float(item[2])
-
-                if raw_text:
-                    individual_results.append(
-                        (
-                            item,
-                            raw_text,
-                            confidence
-                        )
-                    )
-
-            combined_candidates = []
-
-            for item, raw_text, confidence in individual_results:
-
-                combined_candidates.append(
-                    (
-                        raw_text,
-                        confidence
-                    )
-                )
-
-            if len(individual_results) > 1:
-
-                sorted_results = sorted(
-                    individual_results,
-                    key=lambda x: x[0][0][0][0]
-                )
-
-                combined_text = "".join(
-                    item[1]
-                    for item in sorted_results
-                )
-
-                combined_confidence = sum(
-                    item[2]
-                    for item in sorted_results
-                ) / len(sorted_results)
-
-                combined_candidates.append(
-                    (
-                        combined_text,
-                        combined_confidence
-                    )
-                )
-
-            for raw_text, confidence in combined_candidates:
-
-                normalized = normalize_indian_plate(
-                    raw_text
-                )
-
-                valid = validate_indian_plate_raw(
-                    normalized
-                )
-
-                score = confidence
-
-                if valid:
-                    score += 0.50
-
-                if 9 <= len(normalized) <= 10:
-                    score += 0.12
-
-                if len(raw_text) >= 8:
-                    score += 0.05
-
-                if (
-                    score > best_score
-                    or
-                    (
-                        valid
-                        and not best_valid
-                    )
-                ):
-
-                    best_score = score
-                    best_text = normalized
-                    best_confidence = confidence
-                    best_valid = valid
-
-        except Exception:
-            continue
-
-    if not best_text:
-        return "", 0.0
-
-    return (
-        best_text,
-        best_confidence
+    detector = PlateDetector(str(MODEL_PATH))
+    enhancer = ImageEnhancer()
+    ocr = PlateOCR()
+
+    return RecognitionPipeline(
+        detector=detector,
+        enhancer=enhancer,
+        ocr=ocr,
     )
 
 
-def draw_detection(
-    image,
-    box,
-    plate,
-    confidence
-):
-
-    x1, y1, x2, y2 = map(
-        int,
-        box
-    )
-
-    output = image.copy()
-
-    cv2.rectangle(
-        output,
-        (x1, y1),
-        (x2, y2),
-        (0, 217, 255),
-        3
-    )
-
-    label = (
-        f"{plate if plate else 'Plate'} "
-        f"| {confidence:.0%}"
-    )
-
-    text_y = max(
-        y1 - 12,
-        25
-    )
-
-    cv2.rectangle(
-        output,
-        (x1, text_y - 27),
-        (
-            x1 + max(
-                180,
-                len(label) * 12
-            ),
-            text_y + 3
-        ),
-        (10, 25, 40),
-        -1
-    )
-
-    cv2.putText(
-        output,
-        label,
-        (x1 + 6, text_y - 5),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.65,
-        (114, 234, 255),
-        2,
-        cv2.LINE_AA
-    )
-
-    return output
-
-
-def process_frame(image):
-
-    if image is None:
-        return None, []
-
-    if isinstance(
-        image,
-        Image.Image
-    ):
-        image = np.array(image)
-
-    if (
-        len(image.shape) == 3
-        and image.shape[2] == 4
-    ):
-        image = cv2.cvtColor(
-            image,
-            cv2.COLOR_RGBA2RGB
-        )
-
-    rgb_image = image.copy()
-
-    results = model(
-        rgb_image,
-        conf=0.25,
-        verbose=False
-    )
-
-    output = rgb_image.copy()
-    detections = []
-
-    for result in results:
-
-        boxes = result.boxes
-
-        if boxes is None:
-            continue
-
-        for box in boxes:
-
-            coordinates = (
-                box.xyxy[0]
-                .cpu()
-                .numpy()
-            )
-
-            detection_confidence = float(
-                box.conf[0]
-                .cpu()
-                .numpy()
-            )
-
-            x1, y1, x2, y2 = map(
-                int,
-                coordinates
-            )
-
-            x1 = max(
-                0,
-                x1
-            )
-
-            y1 = max(
-                0,
-                y1
-            )
-
-            x2 = min(
-                rgb_image.shape[1],
-                x2
-            )
-
-            y2 = min(
-                rgb_image.shape[0],
-                y2
-            )
-
-            if (
-                x2 <= x1
-                or y2 <= y1
-            ):
-                continue
-
-            plate_width = x2 - x1
-            plate_height = y2 - y1
-
-            padding_x = max(
-                5,
-                int(plate_width * 0.06)
-            )
-
-            padding_y = max(
-                5,
-                int(plate_height * 0.10)
-            )
-
-            crop_x1 = max(
-                0,
-                x1 - padding_x
-            )
-
-            crop_y1 = max(
-                0,
-                y1 - padding_y
-            )
-
-            crop_x2 = min(
-                rgb_image.shape[1],
-                x2 + padding_x
-            )
-
-            crop_y2 = min(
-                rgb_image.shape[0],
-                y2 + padding_y
-            )
-
-            crop = rgb_image[
-                crop_y1:crop_y2,
-                crop_x1:crop_x2
-            ]
-
-            bgr_crop = cv2.cvtColor(
-                crop,
-                cv2.COLOR_RGB2BGR
-            )
-
-            plate_text, ocr_confidence = read_plate(
-                bgr_crop
-            )
-
-            display_confidence = (
-                ocr_confidence
-                if plate_text
-                else detection_confidence
-            )
-
-            output = draw_detection(
-                output,
-                (
-                    x1,
-                    y1,
-                    x2,
-                    y2
-                ),
-                plate_text,
-                display_confidence
-            )
-
-            detections.append({
-                "plate": plate_text,
-                "detection_confidence": detection_confidence,
-                "ocr_confidence": ocr_confidence,
-                "valid": validate_indian_plate(
-                    plate_text
-                )
-            })
-
-    return output, detections
-
-
-def show_detection_results(
-    detections
-):
-
-    if not detections:
-
-        st.warning(
-            "No number plate detected."
-        )
-
-        return
-
-    st.markdown(
-        "### Detection Results"
-    )
-
-    total = len(detections)
-
-    recognized = sum(
-        1
-        for d in detections
-        if d["plate"]
-    )
-
-    valid = sum(
-        1
-        for d in detections
-        if d["valid"]
-    )
-
-    m1, m2, m3 = st.columns(
-        3,
-        gap="large"
-    )
-
-    with m1:
-
-        st.metric(
-            "Plates Detected",
-            total
-        )
-
-    with m2:
-
-        st.metric(
-            "Text Recognized",
-            recognized
-        )
-
-    with m3:
-
-        st.metric(
-            "Valid Indian Plates",
-            valid
-        )
-
-    st.markdown(
-        "<div class='small-gap'></div>",
-        unsafe_allow_html=True
-    )
-
-    for index, detection in enumerate(
-        detections,
-        1
-    ):
-
-        with st.container(
-            border=True
-        ):
-
-            c1, c2, c3 = st.columns(
-                [1.4, 1, 1],
-                gap="large"
-            )
-
-            with c1:
-
-                st.markdown(
-                    f"<div class='result-label'>Plate {index}</div>",
-                    unsafe_allow_html=True
-                )
-
-                plate = (
-                    detection["plate"]
-                    or "Not Recognized"
-                )
-
-                st.markdown(
-                    f"<div class='plate-result'>{plate}</div>",
-                    unsafe_allow_html=True
-                )
-
-            with c2:
-
-                st.metric(
-                    "OCR Confidence",
-                    f"{detection['ocr_confidence']:.1%}"
-                )
-
-            with c3:
-
-                if detection["valid"]:
-
-                    st.success(
-                        "Valid Indian Plate"
-                    )
-
-                elif detection["plate"]:
-
-                    st.warning(
-                        "Format Not Confirmed"
-                    )
-
-                else:
-
-                    st.error(
-                        "Text Not Recognized"
-                    )
-
-
-def reset_image():
-
-    st.session_state.image_key += 1
-    st.session_state.image_signature = None
-    st.session_state.image_result = None
-    st.session_state.image_detections = []
-
-
-def reset_camera():
-
-    st.session_state.camera_key += 1
-    st.session_state.camera_result = None
-    st.session_state.camera_detections = []
-
-
-def close_camera():
-
-    st.session_state.camera_enabled = False
-    st.session_state.camera_key += 1
-    st.session_state.camera_result = None
-    st.session_state.camera_detections = []
-
-
-with st.container():
-
-    header_left, header_right = st.columns(
-        [2.8, 1],
-        gap="large"
-    )
-
-    with header_left:
-
-        st.markdown(
-            "<div style='font-size:24px;font-weight:800;color:#eaf7ff;'>🚘 VisionPlate</div>",
-            unsafe_allow_html=True
-        )
-
-        st.caption(
-            "Smart Plate Recognition"
-        )
-
-    with header_right:
-
-        st.markdown(
-            "<div style='height:8px'></div>",
-            unsafe_allow_html=True
-        )
-
-        n1, n2, n3 = st.columns(
-            3,
-            gap="small"
-        )
-
-        with n1:
-
-            if st.button(
-                "Home",
-                key="nav_home"
-            ):
-
-                st.session_state.section = "Home"
-                st.rerun()
-
-        with n2:
-
-            if st.button(
-                "About",
-                key="nav_about"
-            ):
-
-                st.session_state.section = "About"
-                st.rerun()
-
-        with n3:
-
-            if st.button(
-                "Dashboard",
-                key="nav_dashboard"
-            ):
-
-                st.session_state.section = "Dashboard"
-                st.rerun()
-
-
-st.divider()
-
-
-if not model_ready:
-
-    st.error(
-        "VisionPlate model could not be loaded. "
-        "Make sure plate_model.pt is available in the project folder."
-    )
-
-    with st.expander(
-        "Model Error"
-    ):
-
-        st.code(
-            model_error
-        )
-
-
-if st.session_state.section == "Home":
-
+def render_header():
     left, right = st.columns(
-        [1.65, 1],
-        gap="large"
+        [1.25, 2.2],
+        vertical_alignment="center",
     )
 
     with left:
-
-        st.markdown(
-            "<div class='hero-title'>VISIONPLATE</div>",
-            unsafe_allow_html=True
-        )
-
-        st.markdown(
-            "<div class='hero-tagline'>Smart Plate Recognition</div>",
-            unsafe_allow_html=True
-        )
-
-        st.markdown(
-            """
-            <div class='hero-description'>
-            VisionPlate is an intelligent Automatic Number Plate Recognition
-            system that detects vehicle number plates and extracts plate
-            information using YOLO, EasyOCR, OpenCV and Python.
+        st.markdown("""
+        <div class="top-brand">
+            <div class="brand-symbol">⌁</div>
+            <div>
+                <div class="brand-name">VISIONPLATE</div>
+                <div class="brand-subtitle">Smart Plate Recognition</div>
             </div>
-            """,
-            unsafe_allow_html=True
-        )
-
-        st.markdown(
-            "<div class='small-gap'></div>",
-            unsafe_allow_html=True
-        )
-
-        if st.button(
-            "🚀 Start Now",
-            key="home_start"
-        ):
-
-            st.session_state.section = "Dashboard"
-            st.rerun()
+        </div>
+        """, unsafe_allow_html=True)
 
     with right:
-
-        with st.container(
-            border=True
-        ):
-
-            st.markdown(
-                "<div style='text-align:center;font-size:100px;padding:20px 0;'>🚘</div>",
-                unsafe_allow_html=True
-            )
-
-            st.markdown(
-                "<div style='text-align:center;font-size:19px;font-weight:700;color:#eaf7ff;'>AI Vehicle Recognition</div>",
-                unsafe_allow_html=True
-            )
-
-            st.markdown(
-                "<div style='text-align:center;color:#8296ad;font-size:13px;padding:8px 20px;'>Detect &nbsp;•&nbsp; Read &nbsp;•&nbsp; Validate &nbsp;•&nbsp; Analyze</div>",
-                unsafe_allow_html=True
-            )
-
-    st.markdown(
-        "<div style='height:25px'></div>",
-        unsafe_allow_html=True
-    )
-
-    st.markdown(
-        "<div class='section-kicker'>WHY VISIONPLATE</div>",
-        unsafe_allow_html=True
-    )
-
-    st.markdown(
-        "<div class='section-title'>Intelligent Plate Recognition</div>",
-        unsafe_allow_html=True
-    )
-
-    st.markdown(
-        "<div class='section-description'>A simple interface for fast and automated vehicle plate detection.</div>",
-        unsafe_allow_html=True
-    )
-
-    st.markdown(
-        "<div class='small-gap'></div>",
-        unsafe_allow_html=True
-    )
-
-    f1, f2, f3 = st.columns(
-        3,
-        gap="large"
-    )
-
-    with f1:
-
-        with st.container(
-            border=True
-        ):
-
-            st.markdown(
-                "### 🎯 Accurate Detection"
-            )
-
-            st.markdown(
-                "<div class='card-text'>YOLO identifies vehicle number plate regions from images and captured frames.</div>",
-                unsafe_allow_html=True
-            )
-
-    with f2:
-
-        with st.container(
-            border=True
-        ):
-
-            st.markdown(
-                "### 🔤 OCR Recognition"
-            )
-
-            st.markdown(
-                "<div class='card-text'>EasyOCR extracts readable characters from detected number plates.</div>",
-                unsafe_allow_html=True
-            )
-
-    with f3:
-
-        with st.container(
-            border=True
-        ):
-
-            st.markdown(
-                "### ⚡Fast Processing"
-            )
-
-            st.markdown(
-                "<div class='card-text'>OpenCV preprocessing improves image quality before OCR recognition.</div>",
-                unsafe_allow_html=True
-            )
-
-
-elif st.session_state.section == "About":
-
-    st.title(
-        "About VisionPlate"
-    )
-
-    st.caption(
-        "Smart Plate Recognition using computer vision and OCR."
-    )
-
-    st.markdown(
-        "<div style='height:10px'></div>",
-        unsafe_allow_html=True
-    )
-
-    with st.container(
-        border=True
-    ):
-
-        st.markdown(
-            "### What is VisionPlate?"
+        st.radio(
+            "Main navigation",
+            ["Home", "About", "Dashboard"],
+            horizontal=True,
+            label_visibility="collapsed",
+            key="main_navigation",
+            on_change=sync_navigation,
         )
 
-        st.markdown(
-            """
-            <div class='about-intro'>
-            VisionPlate is an Automatic Number Plate Recognition system
-            designed mainly for Indian vehicle registration plates. It
-            detects number plate regions, extracts characters using OCR,
-            and checks the recognized text against common Indian plate
-            formats.
+    st.markdown(
+        '<div style="height:1px;background:#252c40;margin-bottom:25px"></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def render_footer():
+    st.markdown(
+        '<div class="footer-line">VISIONPLATE · Smart Plate Recognition</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def feature_card(icon, title, description):
+    st.markdown(
+        f"""
+        <div class="feature-card">
+            <div class="feature-icon">{icon}</div>
+            <h3>{title}</h3>
+            <p>{description}</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_home():
+    left, right = st.columns(
+        [1.15, .85],
+        gap="large",
+        vertical_alignment="center",
+    )
+
+    with left:
+        st.markdown("""
+        <div class="hero">
+            <div class="hero-label">AI-POWERED RECOGNITION</div>
+            <h1>Smart vehicle plate <span>recognition.</span></h1>
+            <p>
+                Detect number plates and recognize their characters
+                from vehicle images and videos.
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.button(
+            "Explore Dashboard →",
+            type="primary",
+            use_container_width=True,
+            key="home_explore_dashboard",
+            on_click=navigate_to,
+            args=("Dashboard",),
+        )
+
+    with right:
+        st.markdown("""
+        <div class="hero-art">
+            <div class="orbit">
+                <div class="car-icon">🚘</div>
+                <div class="floating-card scan-card">
+                    <small>Detection</small>
+                    <strong>Ready to scan</strong>
+                </div>
+                <div class="floating-card plate-card">
+                    <small>Plate preview</small>
+                    <div class="plate-number">TS 09 XX 0000</div>
+                </div>
             </div>
-            """,
-            unsafe_allow_html=True
-        )
+        </div>
+        """, unsafe_allow_html=True)
+
+    render_footer()
+
+
+def render_about():
+    st.markdown("""
+    <div class="page-banner">
+        <h1>About VisionPlate</h1>
+        <p>
+            VisionPlate uses computer vision and optical character recognition
+            (OCR) to detect vehicle number plates and recognize their characters
+            from images and videos.
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
 
     st.markdown(
-        "### ✨ Key Features"
+        '<div class="section-heading">Features</div>'
+        '<div class="section-subheading">'
+        'Tools that help detect, enhance, and recognize vehicle number plates.'
+        '</div>',
+        unsafe_allow_html=True,
     )
 
-    with st.container(
-        border=True
-    ):
+    feature_columns = st.columns(3, gap="small")
 
-        feature_columns = st.columns(
+    with feature_columns[0]:
+        feature_card(
+            "◎",
+            "Plate detection",
+            "A trained YOLO model identifies number plate regions in images "
+            "and video frames.",
+        )
+
+    with feature_columns[1]:
+        feature_card(
+            "⌗",
+            "Text recognition",
+            "OCR extracts readable characters from detected number plates "
+            "and provides recognition confidence.",
+        )
+
+    with feature_columns[2]:
+        feature_card(
+            "✦",
+            "Image enhancement",
+            "Optional image enhancement and night-vision processing help "
+            "prepare images for recognition.",
+        )
+
+    st.markdown('<div style="height:25px"></div>', unsafe_allow_html=True)
+
+    st.markdown(
+        '<div class="section-heading">How it works</div>'
+        '<div class="section-subheading">'
+        'Follow three simple steps to process a vehicle image or video.'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    steps = [
+        (
+            "01 / UPLOAD",
+            "Choose a file",
+            "Open the Dashboard and upload a supported vehicle image or video.",
+        ),
+        (
+            "02 / ANALYZE",
+            "Run recognition",
+            "VisionPlate processes the input, detects plate regions, and "
+            "attempts to recognize the characters.",
+        ),
+        (
+            "03 / REVIEW",
+            "View results",
+            "Review detected plates, confidence values, and processed images "
+            "or video. Download the available results and report.",
+        ),
+    ]
+
+    step_columns = st.columns(3, gap="small")
+
+    for column, step in zip(step_columns, steps):
+        with column:
+            st.markdown(
+                f"""
+                <div class="step-card">
+                    <div class="step-number">{step[0]}</div>
+                    <h3>{step[1]}</h3>
+                    <p>{step[2]}</p>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    st.markdown('<div style="height:25px"></div>', unsafe_allow_html=True)
+    render_footer()
+
+
+def as_display_image(image, source_bgr=False):
+    if image is None:
+        return None
+
+    if isinstance(image, Image.Image):
+        return image.convert("RGB")
+
+    arr = np.asarray(image)
+
+    if arr.ndim == 2:
+        return arr
+
+    if arr.ndim == 3 and arr.shape[2] == 4:
+        if source_bgr:
+            return cv2.cvtColor(arr, cv2.COLOR_BGRA2RGBA)
+        return arr
+
+    if arr.ndim == 3 and arr.shape[2] == 3 and source_bgr:
+        return cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
+
+    return arr
+
+
+def to_download_bytes(image):
+    if image is None:
+        return None
+
+    if isinstance(image, bytes):
+        return image
+
+    if isinstance(image, Image.Image):
+        return image_to_bytes(image)
+
+    arr = np.asarray(image)
+
+    if arr.ndim == 2:
+        success, encoded = cv2.imencode(".png", arr)
+    elif arr.ndim == 3 and arr.shape[2] == 4:
+        success, encoded = cv2.imencode(
+            ".png",
+            cv2.cvtColor(arr, cv2.COLOR_RGBA2BGRA),
+        )
+    elif arr.ndim == 3 and arr.shape[2] == 3:
+        success, encoded = cv2.imencode(".png", arr)
+    else:
+        return None
+
+    return encoded.tobytes() if success else None
+
+
+def safe_number(value, default=0.0):
+    try:
+        number = float(value)
+        return number if np.isfinite(number) else default
+    except (ValueError, TypeError):
+        return default
+
+
+def process_image(
+    uploaded_file,
+    pipeline,
+    confidence=0.25,
+    enhance=False,
+    night_vision=False,
+):
+    if uploaded_file is None:
+        raise ValueError("Please upload an image.")
+
+    uploaded_file.seek(0)
+    image = load_image(uploaded_file)
+
+    if image is None:
+        raise ValueError("The uploaded image could not be loaded.")
+
+    started = time.perf_counter()
+
+    result = pipeline.run(
+        image,
+        confidence=confidence,
+        enhance=enhance,
+        night_vision=night_vision,
+    )
+
+    result["processing_ms"] = round(
+        (time.perf_counter() - started) * 1000,
+        2,
+    )
+    result["source_name"] = uploaded_file.name
+    result["timestamp"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    result["mode"] = "image"
+
+    return result
+
+
+def frame_to_bgr(image, fallback):
+    if image is None:
+        return fallback.copy()
+
+    if isinstance(image, Image.Image):
+        rgb = np.asarray(image.convert("RGB"))
+        return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+
+    arr = np.asarray(image)
+
+    if arr.ndim == 2:
+        return cv2.cvtColor(arr, cv2.COLOR_GRAY2BGR)
+
+    if arr.ndim == 3 and arr.shape[2] == 4:
+        return cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
+
+    if arr.ndim == 3 and arr.shape[2] == 3:
+        return cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+
+    return fallback.copy()
+
+
+def process_video(
+    uploaded_file,
+    pipeline,
+    confidence=0.25,
+    enhance=False,
+    night_vision=False,
+):
+    if uploaded_file is None:
+        raise ValueError("Please upload a video.")
+
+    suffix = Path(
+        getattr(uploaded_file, "name", "")
+    ).suffix.lower()
+
+    allowed_extensions = {
+        ".mp4", ".avi", ".mov", ".mkv", ".m4v", ".webm"
+    }
+
+    if suffix not in allowed_extensions:
+        suffix = ".mp4"
+
+    video_bytes = uploaded_file.getvalue()
+
+    if not video_bytes:
+        raise ValueError("The uploaded video is empty.")
+
+    started = time.perf_counter()
+    progress = st.progress(0, text="Preparing video...")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        input_path = Path(temp_dir) / f"input{suffix}"
+        output_path = Path(temp_dir) / "annotated_output.mp4"
+
+        input_path.write_bytes(video_bytes)
+
+        cap = cv2.VideoCapture(str(input_path))
+
+        if not cap.isOpened():
+            cap.release()
+            progress.empty()
+            raise ValueError(
+                "Unable to open this video. Try exporting it "
+                "as MP4 and uploading it again."
+            )
+
+        fps = safe_number(cap.get(cv2.CAP_PROP_FPS), 25.0)
+
+        if fps <= 0:
+            fps = 25.0
+
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+        if width < 1 or height < 1:
+            cap.release()
+            progress.empty()
+            raise ValueError("The video has invalid frame dimensions.")
+
+        writer = cv2.VideoWriter(
+            str(output_path),
+            cv2.VideoWriter_fourcc(*"mp4v"),
+            fps,
+            (width, height),
+        )
+
+        if not writer.isOpened():
+            cap.release()
+            writer.release()
+            progress.empty()
+            raise RuntimeError(
+                "Unable to initialize the MP4 video writer. "
+                "Check your OpenCV video codec support."
+            )
+
+        plates_by_text = OrderedDict()
+        frame_count = 0
+        detections_count = 0
+
+        try:
+            while True:
+                success, frame_bgr = cap.read()
+
+                if not success:
+                    break
+
+                frame_rgb = cv2.cvtColor(
+                    frame_bgr,
+                    cv2.COLOR_BGR2RGB,
+                )
+
+                frame_result = pipeline.run(
+                    frame_rgb,
+                    confidence=confidence,
+                    enhance=enhance,
+                    night_vision=night_vision,
+                )
+
+                detections = frame_result.get("detections", []) or []
+                plates = frame_result.get("plates", []) or []
+
+                detections_count += len(detections)
+
+                for plate in plates:
+                    plate_text = str(
+                        plate.get("text") or ""
+                    ).strip()
+
+                    if not plate_text:
+                        continue
+
+                    score = safe_number(
+                        plate.get("ocr_confidence")
+                    )
+
+                    previous = plates_by_text.get(plate_text)
+
+                    record = {
+                        "text": plate_text,
+                        "ocr_confidence": score,
+                        "detection_confidence": safe_number(
+                            plate.get("detection_confidence")
+                        ),
+                        "valid": plate.get("valid"),
+                        "validation_message": plate.get(
+                            "validation_message", ""
+                        ),
+                        "bbox": plate.get("bbox"),
+                        "ocr_engine": plate.get("ocr_engine"),
+                    }
+
+                    if (
+                        previous is None
+                        or score > previous["ocr_confidence"]
+                    ):
+                        plates_by_text[plate_text] = record
+
+                annotated = frame_result.get("annotated")
+                output_bgr = frame_to_bgr(annotated, frame_bgr)
+
+                if output_bgr.shape[:2] != (height, width):
+                    output_bgr = cv2.resize(
+                        output_bgr,
+                        (width, height),
+                    )
+
+                if output_bgr.ndim != 3 or output_bgr.shape[2] != 3:
+                    raise RuntimeError(
+                        "The pipeline returned an unsupported video frame."
+                    )
+
+                writer.write(output_bgr)
+                frame_count += 1
+
+                if total_frames > 0:
+                    fraction = min(
+                        frame_count / total_frames,
+                        1.0,
+                    )
+                    progress.progress(
+                        fraction,
+                        text=(
+                            f"Processing frame {frame_count} "
+                            f"of {total_frames}..."
+                        ),
+                    )
+                elif frame_count % 10 == 0:
+                    progress.progress(
+                        min(frame_count / (frame_count + 50), 0.95),
+                        text=f"Processed {frame_count} frames...",
+                    )
+
+        finally:
+            cap.release()
+            writer.release()
+
+        if frame_count == 0:
+            progress.empty()
+            raise ValueError(
+                "No readable frames were found in this video."
+            )
+
+        if (
+            not output_path.is_file()
+            or output_path.stat().st_size == 0
+        ):
+            progress.empty()
+            raise RuntimeError(
+                "Video processing finished, but no output video "
+                "was generated."
+            )
+
+        processed_video = output_path.read_bytes()
+
+    progress.progress(1.0, text="Video processing complete.")
+    progress.empty()
+
+    return {
+        "mode": "video",
+        "source_name": getattr(
+            uploaded_file,
+            "name",
+            "uploaded_video",
+        ),
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "processing_ms": round(
+            (time.perf_counter() - started) * 1000,
             2,
-            gap="large"
+        ),
+        "video_bytes": processed_video,
+        "frame_count": frame_count,
+        "detections_count": detections_count,
+        "plates": list(plates_by_text.values()),
+    }
+
+
+def metric_card(label, value):
+    st.markdown(
+        f"""
+        <div class="metric-box">
+            <div class="metric-label">{label}</div>
+            <div class="metric-value">{value}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_plate_results(plates):
+    if not plates:
+        st.info("No plate text was recognized.")
+        return
+
+    for index, plate in enumerate(plates, start=1):
+        plate_text = str(
+            plate.get("text") or "Text not recognized"
+        )
+        ocr_confidence = safe_number(
+            plate.get("ocr_confidence")
         )
 
-        features = [
-            (
-                "Automatic Plate Detection",
-                "Detects number plate regions using YOLO."
-            ),
-            (
-                "OCR Recognition",
-                "Extracts characters using EasyOCR with an alphanumeric allowlist."
-            ),
-            (
-                "Image Processing",
-                "Uses OpenCV preprocessing and image enhancement before OCR."
-            ),
-            (
-                "Video Processing",
-                "Supports vehicle plate detection from uploaded videos."
-            ),
-            (
-                "Camera Recognition",
-                "Captures vehicle images through the device camera."
-            ),
-            (
-                "Indian Plate Validation",
-                "Checks recognized text against common Indian registration plate formats."
+        with st.container(border=True):
+            left, right = st.columns(
+                [1.5, 1],
+                vertical_alignment="center",
             )
-        ]
 
-        for index, (
-            title,
-            description
-        ) in enumerate(features):
-
-            with feature_columns[index % 2]:
-
+            with left:
                 st.markdown(
-                    f"### {title}"
+                    f"""
+                    <div class="plate-result">
+                        <div class="muted">PLATE {index}</div>
+                        <div class="plate-result-number">{plate_text}</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
                 )
 
-                st.markdown(
-                    f"<div class='card-text'>{description}</div>",
-                    unsafe_allow_html=True
+                if plate.get("validation_message"):
+                    st.caption(
+                        str(plate["validation_message"])
+                    )
+
+            with right:
+                st.metric(
+                    "OCR confidence",
+                    f"{ocr_confidence:.1%}",
                 )
+
+                if plate.get("valid") is True:
+                    st.success("Format matched")
+                elif plate.get("valid") is False:
+                    st.warning("Format not matched")
+
+            crop = plate.get("crop")
+
+            if crop is not None:
+                with st.expander(f"View plate crop {index}"):
+                    st.image(
+                        as_display_image(crop),
+                        caption=f"Plate {index}",
+                        width=280,
+                    )
+
+
+def build_report(result):
+    plates = []
+
+    for plate in result.get("plates", []):
+        plates.append({
+            "text": str(plate.get("text", "")),
+            "detection_confidence": safe_number(
+                plate.get("detection_confidence")
+            ),
+            "ocr_confidence": safe_number(
+                plate.get("ocr_confidence")
+            ),
+            "valid": plate.get("valid"),
+            "validation_message": str(
+                plate.get("validation_message", "")
+            ),
+            "bbox": plate.get("bbox"),
+            "ocr_engine": plate.get("ocr_engine"),
+        })
+
+    report = {
+        "application": "VisionPlate",
+        "mode": result.get("mode", "image"),
+        "source_file": result.get("source_name"),
+        "timestamp": result.get("timestamp"),
+        "processing_time_ms": result.get("processing_ms"),
+        "detected_plate_count": len(plates),
+        "plates": plates,
+    }
+
+    if result.get("mode") == "video":
+        report["processed_frames"] = result.get("frame_count")
+        report["total_detections"] = result.get(
+            "detections_count"
+        )
+    else:
+        report["enhancement_applied"] = result.get(
+            "enhancement_applied"
+        )
+        report["night_vision_applied"] = result.get(
+            "night_vision_applied"
+        )
+
+    return json.dumps(
+        report,
+        indent=2,
+        default=str,
+    ).encode("utf-8")
+
+
+def render_image_results(result):
+    plates = result.get("plates", [])
+    detections = result.get("detections", [])
 
     st.markdown(
-        "### 🛠️ Technology Stack"
+        '<div class="section-heading">Recognition results</div>',
+        unsafe_allow_html=True,
     )
 
-    with st.container(
-        border=True
-    ):
+    c1, c2, c3 = st.columns(3, gap="medium")
 
-        technologies = [
-            (
-                "Python",
-                "Core programming and application logic"
-            ),
-            (
-                "YOLO",
-                "Number plate object detection"
-            ),
-            (
-                "EasyOCR",
-                "Optical character recognition"
-            ),
-            (
-                "OpenCV",
-                "Image processing and enhancement"
-            ),
-            (
-                "Streamlit",
-                "Interactive web interface"
-            ),
-            (
-                "PyTorch",
-                "Deep learning model execution"
-            )
-        ]
+    with c1:
+        metric_card("PLATES RECOGNIZED", len(plates))
 
-        tech_columns = st.columns(
-            3,
-            gap="large"
+    with c2:
+        metric_card("DETECTIONS", len(detections))
+
+    with c3:
+        metric_card(
+            "PROCESSING TIME",
+            f'{safe_number(result.get("processing_ms")):.0f} ms',
         )
 
-        for index, (
-            name,
-            description
-        ) in enumerate(technologies):
+    st.markdown(
+        '<div style="height:20px"></div>',
+        unsafe_allow_html=True,
+    )
 
-            with tech_columns[index % 3]:
+    images = [
+        (result.get("annotated"), "Annotated image"),
+        (result.get("original"), "Original image"),
+        (result.get("enhanced"), "Enhanced image"),
+    ]
 
-                st.markdown(
-                    f"<div class='tech-name'>{name}</div>",
-                    unsafe_allow_html=True
+    tabs = st.tabs([item[1] for item in images])
+
+    for tab, (image, caption) in zip(tabs, images):
+        with tab:
+            if image is not None:
+                _, image_col, _ = st.columns(
+                    [0.5, 2, 0.5],
+                    gap="small",
                 )
 
-                st.markdown(
-                    f"<div class='tech-desc'>{description}</div>",
-                    unsafe_allow_html=True
-                )
-
-
-elif st.session_state.section == "Dashboard":
-
-    st.title(
-        "VisionPlate Dashboard"
-    )
-
-    st.caption(
-        "Upload an image, process a video, or capture a vehicle plate using your device camera."
-    )
-
-    if not model_ready:
-
-        st.warning(
-            "The detection model is not available. Add plate_model.pt to continue."
-        )
-
-    tab_image, tab_video, tab_camera = st.tabs(
-        [
-            "🖼️ Image",
-            "🎥 Video",
-            "📷 Camera"
-        ]
-    )
-
-    with tab_image:
-
-        with st.container(
-            border=True
-        ):
-
-            st.markdown(
-                "### Upload Vehicle Image"
-            )
-
-            st.caption(
-                "Supported formats: JPG, JPEG, PNG"
-            )
-
-            image_file = st.file_uploader(
-                "Choose an image",
-                type=[
-                    "jpg",
-                    "jpeg",
-                    "png"
-                ],
-                key=f"image_uploader_{st.session_state.image_key}",
-                label_visibility="collapsed"
-            )
-
-        if image_file is not None:
-
-            file_bytes = image_file.getvalue()
-
-            current_signature = hashlib.md5(
-                file_bytes
-            ).hexdigest()
-
-            if (
-                st.session_state.image_signature is not None
-                and
-                st.session_state.image_signature != current_signature
-            ):
-
-                st.session_state.image_result = None
-                st.session_state.image_detections = []
-
-            st.session_state.image_signature = current_signature
-
-            original_image = Image.open(
-                image_file
-            ).convert("RGB")
-
-            st.markdown(
-                "<div style='height:8px'></div>",
-                unsafe_allow_html=True
-            )
-
-            input_col, output_col = st.columns(
-                2,
-                gap="large"
-            )
-
-            with input_col:
-
-                with st.container(
-                    border=True
-                ):
-
-                    st.markdown(
-                        "### Input Image"
-                    )
-
+                with image_col:
                     st.image(
-                        original_image,
-                        use_container_width=True
+                        as_display_image(image),
+                        caption=caption,
+                        use_container_width=True,
                     )
-
-            with output_col:
-
-                with st.container(
-                    border=True
-                ):
-
-                    st.markdown(
-                        "### Detection Output"
-                    )
-
-                    if st.session_state.image_result is not None:
-
-                        st.image(
-                            st.session_state.image_result,
-                            use_container_width=True
-                        )
-
-                    else:
-
-                        st.info(
-                            "Click Process Image to detect the number plate."
-                        )
-
-            st.markdown(
-                "<div style='height:8px'></div>",
-                unsafe_allow_html=True
-            )
-
-            action1, action2 = st.columns(
-                2,
-                gap="large"
-            )
-
-            with action1:
-
-                if st.button(
-                    "🔍 Process Image",
-                    key="process_image",
-                    disabled=not model_ready
-                ):
-
-                    with st.spinner(
-                        "Detecting and reading number plate..."
-                    ):
-
-                        result_image, detections = process_frame(
-                            original_image
-                        )
-
-                    st.session_state.image_result = result_image
-                    st.session_state.image_detections = detections
-
-                    st.rerun()
-
-            with action2:
-
-                if st.button(
-                    "↻ Reset",
-                    key="reset_image"
-                ):
-
-                    reset_image()
-                    st.rerun()
-
-            if st.session_state.image_detections:
-
-                st.markdown(
-                    "<div style='height:8px'></div>",
-                    unsafe_allow_html=True
-                )
-
-                show_detection_results(
-                    st.session_state.image_detections
-                )
-
-    with tab_video:
-
-        with st.container(
-            border=True
-        ):
-
-            st.markdown(
-                "### Upload Video"
-            )
-
-            st.caption(
-                "Upload a video containing vehicles for plate detection."
-            )
-
-            video_file = st.file_uploader(
-                "Choose a video",
-                type=[
-                    "mp4",
-                    "avi",
-                    "mov",
-                    "mkv"
-                ],
-                key=f"video_uploader_{st.session_state.video_key}",
-                label_visibility="collapsed"
-            )
-
-        if video_file is not None:
-
-            video_bytes = video_file.getvalue()
-
-            with st.container(
-                border=True
-            ):
-
-                st.markdown(
-                    "### Video Preview"
-                )
-
-                st.video(
-                    video_bytes
-                )
-
-            if st.button(
-                "↻ Reset Video",
-                key="reset_video"
-            ):
-
-                st.session_state.video_key += 1
-                st.rerun()
-
-            st.info(
-                "Video preview is available. Frame-by-frame automatic processing "
-                "can be connected to the YOLO pipeline when required."
-            )
-
-    with tab_camera:
-
-        if not st.session_state.camera_enabled:
-
-            with st.container(
-                border=True
-            ):
-
-                st.markdown(
-                    "### Camera Recognition"
-                )
-
-                st.markdown(
-                    "<div class='camera-note'>Your camera remains inactive until you click the button below.</div>",
-                    unsafe_allow_html=True
-                )
-
-                st.markdown(
-                    "<div style='height:10px'></div>",
-                    unsafe_allow_html=True
-                )
-
-                if st.button(
-                    "📷 Open Camera",
-                    key="open_camera"
-                ):
-
-                    st.session_state.camera_enabled = True
-                    st.rerun()
-
-        else:
-
-            with st.container(
-                border=True
-            ):
-
-                st.markdown(
-                    "### Camera Capture"
-                )
-
-                st.caption(
-                    "Capture a vehicle image using your device camera."
-                )
-
-                captured_image = st.camera_input(
-                    "Capture Image",
-                    key=f"camera_capture_{st.session_state.camera_key}",
-                    label_visibility="collapsed"
-                )
-
-                camera_actions_1, camera_actions_2 = st.columns(
-                    2,
-                    gap="large"
-                )
-
-                with camera_actions_1:
-
-                    if st.button(
-                        "✕ Close Camera",
-                        key="close_camera"
-                    ):
-
-                        close_camera()
-                        st.rerun()
-
-                with camera_actions_2:
-
-                    if st.button(
-                        "↻ Reset Camera",
-                        key="reset_camera"
-                    ):
-
-                        reset_camera()
-                        st.rerun()
-
-            if captured_image is not None:
-
-                camera_image = Image.open(
-                    captured_image
-                ).convert("RGB")
-
-                input_col, output_col = st.columns(
-                    2,
-                    gap="large"
-                )
-
-                with input_col:
-
-                    with st.container(
-                        border=True
-                    ):
-
-                        st.markdown(
-                            "### Captured Image"
-                        )
-
-                        st.image(
-                            camera_image,
-                            use_container_width=True
-                        )
-
-                with output_col:
-
-                    with st.container(
-                        border=True
-                    ):
-
-                        st.markdown(
-                            "### Detection Output"
-                        )
-
-                        if st.session_state.camera_result is not None:
-
-                            st.image(
-                                st.session_state.camera_result,
-                                use_container_width=True
-                            )
-
-                        else:
-
-                            st.info(
-                                "Click Process Camera to detect the plate."
-                            )
-
-                st.markdown(
-                    "<div style='height:8px'></div>",
-                    unsafe_allow_html=True
-                )
-
-                if st.button(
-                    "🔍 Process Camera",
-                    key="process_camera",
-                    disabled=not model_ready
-                ):
-
-                    with st.spinner(
-                        "Processing captured image..."
-                    ):
-
-                        result_image, detections = process_frame(
-                            camera_image
-                        )
-
-                    st.session_state.camera_result = result_image
-                    st.session_state.camera_detections = detections
-
-                    st.rerun()
-
-                if st.session_state.camera_detections:
-
-                    st.markdown(
-                        "<div style='height:8px'></div>",
-                        unsafe_allow_html=True
-                    )
-
-                    show_detection_results(
-                        st.session_state.camera_detections
-                    )
-
-
-st.divider()
-
-with st.container():
-
-    footer_1, footer_2, footer_3 = st.columns(
-        [1.4, 1, 1],
-        gap="large"
+            else:
+                st.info(f"{caption} unavailable.")
+
+    st.markdown(
+        '<div style="height:20px"></div>',
+        unsafe_allow_html=True,
     )
 
-    with footer_1:
+    st.markdown(
+        '<div class="section-heading">Recognized plates</div>',
+        unsafe_allow_html=True,
+    )
 
+    render_plate_results(plates)
+
+    annotated_bytes = to_download_bytes(
+        result.get("annotated")
+    )
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        if annotated_bytes:
+            st.download_button(
+                "Download annotated image",
+                data=annotated_bytes,
+                file_name="visionplate_annotated.png",
+                mime="image/png",
+                use_container_width=True,
+                key="download_annotated_image",
+            )
+
+    with col2:
+        st.download_button(
+            "Download recognition report",
+            data=build_report(result),
+            file_name="visionplate_report.json",
+            mime="application/json",
+            use_container_width=True,
+            key="download_image_report",
+        )
+
+
+def render_video_results(result):
+    st.markdown(
+        '<div class="section-heading">Video results</div>',
+        unsafe_allow_html=True,
+    )
+
+    c1, c2, c3 = st.columns(3, gap="medium")
+
+    with c1:
+        metric_card(
+            "FRAMES PROCESSED",
+            result.get("frame_count", 0),
+        )
+
+    with c2:
+        metric_card(
+            "DETECTIONS",
+            result.get("detections_count", 0),
+        )
+
+    with c3:
+        metric_card(
+            "PROCESSING TIME",
+            f'{safe_number(result.get("processing_ms")):.0f} ms',
+        )
+
+    _, video_col, _ = st.columns(
+        [0.5, 2, 0.5],
+        gap="small",
+    )
+
+    with video_col:
+        st.video(result["video_bytes"])
+
+    st.download_button(
+        "Download processed video",
+        data=result["video_bytes"],
+        file_name="visionplate_processed.mp4",
+        mime="video/mp4",
+        use_container_width=True,
+        key="download_processed_video",
+    )
+
+    st.markdown(
+        '<div style="height:20px"></div>',
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        '<div class="section-heading">Recognized plates</div>',
+        unsafe_allow_html=True,
+    )
+
+    render_plate_results(result.get("plates", []))
+
+    st.download_button(
+        "Download recognition report",
+        data=build_report(result),
+        file_name="visionplate_video_report.json",
+        mime="application/json",
+        use_container_width=True,
+        key="download_video_report",
+    )
+
+
+def render_results(result):
+    if not result:
+        return
+
+    if result.get("mode") == "video":
+        render_video_results(result)
+    else:
+        render_image_results(result)
+
+
+def reset_current_upload(upload_type):
+    if upload_type == "Image":
+        st.session_state.image_upload_version += 1
+    else:
+        st.session_state.video_upload_version += 1
+
+    st.session_state.last_result = None
+    st.session_state.last_filename = None
+    st.session_state.processing_error = None
+
+    st.rerun()
+
+
+def render_dashboard():
+    st.markdown("""
+    <div class="page-banner">
+        <h1>Recognition Dashboard</h1>
+        <p>Upload an image or video to recognize number plates.</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    try:
+        pipeline = load_pipeline()
+    except Exception as exc:
+        st.error("Could not load the recognition models.")
+        st.exception(exc)
+        return
+
+    upload_col, settings_col = st.columns(
+        [1.35, .85],
+        gap="large",
+    )
+
+    with upload_col:
+        st.markdown("### Upload file")
+
+        upload_type = st.radio(
+            "Choose input type",
+            ["Image", "Video"],
+            horizontal=True,
+            key="dashboard_upload_type",
+        )
+
+        if upload_type == "Image":
+            upload_key = (
+                f"dashboard_image_upload_"
+                f"{st.session_state.image_upload_version}"
+            )
+
+            uploaded_file = st.file_uploader(
+                "Choose an image",
+                type=["jpg", "jpeg", "png", "webp", "bmp"],
+                help="Supported formats: JPG, PNG, WEBP, BMP.",
+                key=upload_key,
+            )
+        else:
+            upload_key = (
+                f"dashboard_video_upload_"
+                f"{st.session_state.video_upload_version}"
+            )
+
+            uploaded_file = st.file_uploader(
+                "Choose a video",
+                type=["mp4", "avi", "mov", "mkv", "m4v", "webm"],
+                help="Supported formats depend on your OpenCV installation.",
+                key=upload_key,
+            )
+
+        if uploaded_file is not None and upload_type == "Image":
+            try:
+                uploaded_file.seek(0)
+                preview = Image.open(uploaded_file).convert("RGB")
+
+                _, preview_col, _ = st.columns(
+                    [0.5, 2, 0.5],
+                    gap="small",
+                )
+
+                with preview_col:
+                    st.image(
+                        preview,
+                        caption=uploaded_file.name,
+                        use_container_width=True,
+                    )
+
+            except Exception:
+                st.error("Could not preview the uploaded image.")
+
+        elif uploaded_file is not None and upload_type == "Video":
+            _, preview_col, _ = st.columns(
+                [0.5, 2, 0.5],
+                gap="small",
+            )
+
+            with preview_col:
+                st.video(uploaded_file.getvalue())
+
+    with settings_col:
+        st.markdown("### Recognition settings")
+
+        enhance = st.checkbox(
+            "Image enhancement",
+            value=False,
+            key="dashboard_enhance",
+        )
+
+        night_vision = st.checkbox(
+            "Night-vision enhancement",
+            value=False,
+            key="dashboard_night_vision",
+        )
+
+        button_col1, button_col2 = st.columns(2)
+
+        with button_col1:
+            analyze_clicked = st.button(
+                "Analyze Image" if upload_type == "Image"
+                else "Analyze Video",
+                type="primary",
+                use_container_width=True,
+                disabled=uploaded_file is None,
+                key="dashboard_analyze",
+            )
+
+        with button_col2:
+            reset_clicked = st.button(
+                "Reset Image" if upload_type == "Image"
+                else "Reset Video",
+                use_container_width=True,
+                key="dashboard_reset",
+            )
+
+    if reset_clicked:
+        reset_current_upload(upload_type)
+
+    if analyze_clicked and uploaded_file is not None:
+        try:
+            with st.spinner("Analyzing..."):
+                if upload_type == "Image":
+                    result = process_image(
+                        uploaded_file=uploaded_file,
+                        pipeline=pipeline,
+                        confidence=DEFAULT_CONFIDENCE,
+                        enhance=enhance,
+                        night_vision=night_vision,
+                    )
+                else:
+                    result = process_video(
+                        uploaded_file=uploaded_file,
+                        pipeline=pipeline,
+                        confidence=DEFAULT_CONFIDENCE,
+                        enhance=enhance,
+                        night_vision=night_vision,
+                    )
+
+            st.session_state.last_result = result
+            st.session_state.last_filename = uploaded_file.name
+            st.session_state.processing_error = None
+
+            plate_count = len(result.get("plates", []))
+
+            if result.get("mode") == "video":
+                detection_count = result.get("detections_count", 0)
+            else:
+                detection_count = len(result.get("detections", []))
+
+            st.session_state.history.append({
+                "File": uploaded_file.name,
+                "Type": upload_type,
+                "Plates": plate_count,
+                "Detections": detection_count,
+                "Time (ms)": result.get("processing_ms", 0),
+                "Timestamp": result.get("timestamp"),
+            })
+
+            st.rerun()
+
+        except Exception as exc:
+            st.session_state.processing_error = (
+                f"{type(exc).__name__}: {exc}"
+            )
+            st.error("File processing failed.")
+            st.exception(exc)
+
+    if st.session_state.processing_error:
+        st.error(st.session_state.processing_error)
+
+    st.markdown(
+        '<div style="height:28px"></div>',
+        unsafe_allow_html=True,
+    )
+
+    if st.session_state.last_result:
+        render_results(st.session_state.last_result)
+    else:
+        st.caption("Your recognition results will appear here.")
+
+    if st.session_state.history:
         st.markdown(
-            "<div class='footer-brand'>🚘 VisionPlate</div>",
-            unsafe_allow_html=True
+            '<div style="height:32px"></div>',
+            unsafe_allow_html=True,
         )
 
         st.markdown(
-            "<div class='footer-tagline'>Smart Plate Recognition</div>",
-            unsafe_allow_html=True
+            '<div class="section-heading">Recent activity</div>',
+            unsafe_allow_html=True,
         )
 
-    with footer_2:
-
-        st.markdown(
-            "<div class='footer-text'>© 2026 VisionPlate<br>All rights reserved</div>",
-            unsafe_allow_html=True
+        st.dataframe(
+            st.session_state.history[::-1],
+            use_container_width=True,
+            hide_index=True,
         )
 
-    with footer_3:
+        if st.button("Clear activity", key="clear_session_activity"):
+            st.session_state.history = []
+            st.rerun()
 
-        st.markdown(
-            "<div class='footer-text'>+91 XXXXX XXXXX<br>visionplate@mail.com</div>",
-            unsafe_allow_html=True
-        )
+    render_footer()
+
+
+def main():
+    init_state()
+    render_header()
+
+    page = st.session_state.page
+
+    if page == "Home":
+        render_home()
+    elif page == "About":
+        render_about()
+    elif page == "Dashboard":
+        render_dashboard()
+    else:
+        navigate_to("Home")
+        st.rerun()
+
+
+if __name__ == "__main__":
+    main()
